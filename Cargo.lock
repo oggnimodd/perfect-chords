@@ -1880,6 +1880,8 @@ dependencies = [
  "crossbeam-channel",
  "nih_plug",
  "nih_plug_egui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
