@@ -32,4 +32,6 @@ logs
 tasks/**
 
 # db
+# Generated files
+chords-builder/chords.json
 *.db
