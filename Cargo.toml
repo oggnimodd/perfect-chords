@@ -1,0 +1,20 @@
+[workspace]
+members = ["xtask"]
+
+[package]
+name = "perfect-chords"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# The `lib` artifact is needed for the standalone target
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+
+# This is needed for safely sharing parameters between the GUI and audio thread.
+# We don't have parameters yet, but we will, so it's good to have it ready.
+atomic_float = "0.1"
+crossbeam-channel = "0.5.15"
