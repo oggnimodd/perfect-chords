@@ -1,0 +1,27 @@
+{
+  "name": "perfect-chords",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "format": "biome format --write",
+    "check": "biome check --write",
+    "prepare": "husky",
+    "pre-commit": "lint-staged",
+    "generate-chords": "bun run chords-builder/index.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.1.1",
+    "@types/bun": "latest",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.1.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "lint-staged": {
+    "**/*.{js,ts,json,jsonc}": [
+      "biome format --write --staged"
+    ]
+  }
+}
