@@ -73,11 +73,12 @@ enum MidiMessage {
     UpdateOctave(i8),
     UpdateInversion(ChordId, u8),
     UpdateScale(String),
+    UpdateKeyMapping(egui::Key, ChordId),
     KeyChordOn(egui::Key),
     KeyChordOff(egui::Key),
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct GuiState {
     octave: i8,
     root_note: String,
@@ -88,9 +89,26 @@ struct GuiState {
     inversion_map: HashMap<ChordId, u8>,
 
     key_mappings: HashMap<egui::Key, ChordId>,
-    active_key_chord: Option<egui::Key>,
+    active_keys: Vec<egui::Key>,
     view_mode: ViewMode,
     key_to_map: Option<egui::Key>,
+}
+
+impl Default for GuiState {
+    fn default() -> Self {
+        Self {
+            octave: 3,
+            root_note: "C".to_string(),
+            scale_type: "Major".to_string(),
+            playing_chord: None,
+            inversion_chord: None,
+            inversion_map: HashMap::new(),
+            key_mappings: generate_default_key_mappings(&get_scale_map(), "C Major".to_string()),
+            active_keys: Vec::new(),
+            view_mode: ViewMode::ChordGrid,
+            key_to_map: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,18 +153,7 @@ impl Default for PerfectChords {
             active_notes: Vec::new(),
             chord_table,
             scale_map: get_scale_map(),
-            state: GuiState {
-                octave: 3,
-                root_note: "C".to_string(),
-                scale_type: "Major".to_string(),
-                playing_chord: None,
-                inversion_chord: None,
-                inversion_map: HashMap::new(),
-                key_mappings: generate_default_key_mappings(&get_scale_map(), "C Major".to_string()),
-                active_key_chord: None,
-                view_mode: ViewMode::ChordGrid,
-                key_to_map: None,
-            },
+            state: GuiState::default(),
         }
     }
 }
@@ -246,7 +253,6 @@ impl Plugin for PerfectChords {
                 let scale = format!("{} {}", state.root_note, state.scale_type);
                 let diatonics = scale_map.get(&scale).cloned().unwrap_or_default();
 
-                // Handle keyboard input for playing chords
                 egui_ctx.input(|i| {
                     for event in &i.events {
                         if let egui::Event::Key {
@@ -256,15 +262,23 @@ impl Plugin for PerfectChords {
                             ..
                         } = event
                         {
-                            if *pressed && !*repeat {
-                                if state.key_mappings.contains_key(key) {
-                                    state.active_key_chord = Some(*key);
-                                    let _ = sender.send(MidiMessage::KeyChordOn(*key));
-                                }
-                            } else if !*pressed {
-                                if state.active_key_chord == Some(*key) {
-                                    state.active_key_chord = None;
-                                    let _ = sender.send(MidiMessage::KeyChordOff(*key));
+                            if state.key_mappings.contains_key(key) {
+                                if *pressed && !*repeat {
+                                    if !state.active_keys.contains(key) {
+                                        state.active_keys.push(*key);
+                                        let _ = sender.send(MidiMessage::KeyChordOn(*key));
+                                    }
+                                } else if !*pressed {
+                                    if let Some(pos) =
+                                        state.active_keys.iter().position(|&k| k == *key)
+                                    {
+                                        state.active_keys.remove(pos);
+                                        if let Some(&last_key) = state.active_keys.last() {
+                                            let _ = sender.send(MidiMessage::KeyChordOn(last_key));
+                                        } else {
+                                            let _ = sender.send(MidiMessage::KeyChordOff(*key));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -408,8 +422,10 @@ impl Plugin for PerfectChords {
                                                     state.inversion_chord.as_ref() == Some(&chord_id);
                                                 let is_diatonic = d.chord_type == type_key;
                                                 
-                                                let is_key_active = state.active_key_chord
-                                                    .and_then(|key| state.key_mappings.get(&key))
+                                                let is_key_active = state
+                                                    .active_keys
+                                                    .last()
+                                                    .and_then(|key| state.key_mappings.get(key))
                                                     == Some(&chord_id);
 
 
@@ -510,9 +526,12 @@ impl Plugin for PerfectChords {
                                                             ));
 
                                                         if ui.add(button).clicked() {
-                                                            state.key_mappings.retain(|_k, v| {
-                                                                v != &chord_id
-                                                            });
+                                                            let _ = sender.send(
+                                                                MidiMessage::UpdateKeyMapping(
+                                                                    key_to_map,
+                                                                    chord_id.clone(),
+                                                                ),
+                                                            );
                                                             state.key_mappings.insert(
                                                                 key_to_map,
                                                                 chord_id.clone(),
@@ -630,22 +649,31 @@ impl Plugin for PerfectChords {
                     if parts.len() == 2 {
                         self.state.root_note = parts[0].to_string();
                         self.state.scale_type = parts[1].to_string();
-                        self.state.key_mappings = generate_default_key_mappings(&self.scale_map, scale);
+                        self.state.key_mappings =
+                            generate_default_key_mappings(&self.scale_map, scale);
                     }
                 }
+                MidiMessage::UpdateKeyMapping(key, chord_id) => {
+                    self.state.key_mappings.insert(key, chord_id);
+                }
                 MidiMessage::KeyChordOn(key) => {
-                    for note in self.active_notes.drain(..) {
-                        context.send_event(NoteEvent::NoteOff {
-                            timing: 0,
-                            voice_id: None,
-                            channel: 0,
-                            note,
-                            velocity: 0.0,
-                        });
-                    }
-
                     if let Some(chord_id) = self.state.key_mappings.get(&key).cloned() {
-                        let current_inversion = self.state.inversion_map.get(&chord_id).copied().unwrap_or(0);
+                        if self.state.playing_chord.as_ref() == Some(&chord_id) {
+                            continue;
+                        }
+
+                        for note in self.active_notes.drain(..) {
+                            context.send_event(NoteEvent::NoteOff {
+                                timing: 0,
+                                voice_id: None,
+                                channel: 0,
+                                note,
+                                velocity: 0.0,
+                            });
+                        }
+
+                        let current_inversion =
+                            self.state.inversion_map.get(&chord_id).copied().unwrap_or(0);
                         if let Some(voicing) = self
                             .chord_table
                             .get(&chord_id.root_note)
@@ -670,6 +698,7 @@ impl Plugin for PerfectChords {
                                 }
                             }
                         }
+                        self.state.playing_chord = Some(chord_id);
                     }
                 }
                 MidiMessage::KeyChordOff(_key) => {
@@ -682,6 +711,7 @@ impl Plugin for PerfectChords {
                             velocity: 0.0,
                         });
                     }
+                    self.state.playing_chord = None;
                 }
             }
         }
