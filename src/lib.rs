@@ -78,7 +78,8 @@ enum MidiMessage {
 #[derive(Default, Clone)]
 struct GuiState {
     octave: i8,
-    scale: String,
+    root_note: String,
+    scale_type: String,
     inversion: u8,
     playing_chord: Option<ChordId>,
     inversion_chord: Option<ChordId>,
@@ -116,7 +117,8 @@ impl Default for PerfectChords {
             scale_map: get_scale_map(),
             state: GuiState {
                 octave: 3,
-                scale: "C Major".to_string(),
+                root_note: "C".to_string(),
+                scale_type: "Major".to_string(),
                 inversion: 0,
                 playing_chord: None,
                 inversion_chord: None,
@@ -191,30 +193,48 @@ impl Plugin for PerfectChords {
                     ("dim7", "dim7"),
                 ];
 
-                let diatonics = scale_map.get(&state.scale).cloned().unwrap_or_default();
+                let scale = format!("{} {}", state.root_note, state.scale_type);
+                let diatonics = scale_map.get(&scale).cloned().unwrap_or_default();
 
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
                     ui.style_mut().spacing.button_padding = egui::vec2(4.0, 4.0);
                     ui.style_mut().spacing.item_spacing = egui::vec2(2.0, 2.0);
 
                     ui.horizontal(|ui| {
-                        ui.label("Scale:");
-                        egui::ComboBox::from_id_salt("scale_picker")
-                            .selected_text(&state.scale)
+                        ui.label("Root Note:");
+                        egui::ComboBox::from_id_salt("root_note_picker")
+                            .selected_text(&state.root_note)
                             .show_ui(ui, |ui| {
-                                let mut sorted_scales: Vec<_> = scale_map.keys().collect();
-                                sorted_scales.sort();
-                                for scale_name in sorted_scales {
+                                for note in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].iter() {
                                     if ui
                                         .selectable_value(
-                                            &mut state.scale,
-                                            scale_name.clone(),
-                                            scale_name,
+                                            &mut state.root_note,
+                                            note.to_string(),
+                                            *note,
                                         )
                                         .clicked()
                                     {
-                                        let _ = sender
-                                            .send(MidiMessage::UpdateScale(scale_name.clone()));
+                                        let new_scale = format!("{} {}", state.root_note, state.scale_type);
+                                        let _ = sender.send(MidiMessage::UpdateScale(new_scale));
+                                    }
+                                }
+                            });
+
+                        ui.label("Scale Type:");
+                        egui::ComboBox::from_id_salt("scale_type_picker")
+                            .selected_text(&state.scale_type)
+                            .show_ui(ui, |ui| {
+                                for scale_type in ["Major", "Minor"].iter() {
+                                    if ui
+                                        .selectable_value(
+                                            &mut state.scale_type,
+                                            scale_type.to_string(),
+                                            *scale_type,
+                                        )
+                                        .clicked()
+                                    {
+                                        let new_scale = format!("{} {}", state.root_note, state.scale_type);
+                                        let _ = sender.send(MidiMessage::UpdateScale(new_scale));
                                     }
                                 }
                             });
@@ -267,14 +287,17 @@ impl Plugin for PerfectChords {
 
                                     if chord_table
                                         .get(root_note)
-                                                                                   .and_then(|vars| vars.get(type_key))                                        .is_some()
+                                        .and_then(|vars| vars.get(type_key))
+                                        .is_some()
                                     {
                                         let label = format!("{}{}", root_note, suffix);
                                         let is_playing =
                                             state.playing_chord.as_ref() == Some(&chord_id);
                                         let is_inversion_target =
                                             state.inversion_chord.as_ref() == Some(&chord_id);
-                                          let is_diatonic = d.chord_type == type_key;                                        let button_color = if is_playing {
+                                        let is_diatonic = d.chord_type == type_key;
+
+                                        let button_color = if is_playing {
                                             egui::Color32::from_rgb(100, 200, 100)
                                         } else if is_inversion_target {
                                             egui::Color32::from_rgb(100, 150, 255)
@@ -284,9 +307,9 @@ impl Plugin for PerfectChords {
                                             ui.visuals().widgets.noninteractive.bg_fill
                                         };
 
-                                          let button = egui::Button::new(label)
-                                              .min_size(egui::vec2(ui.available_width() / diatonics.len() as f32, ui.available_height() / grid_rows.len() as f32))
-                                              .fill(button_color);
+                                        let button = egui::Button::new(label)
+                                            .min_size(egui::vec2(ui.available_width() / diatonics.len() as f32, ui.available_height() / grid_rows.len() as f32))
+                                            .fill(button_color);
                                         let response = ui.add(button);
 
                                         if response.hovered()
@@ -394,7 +417,11 @@ impl Plugin for PerfectChords {
                     self.state.inversion = inversion;
                 }
                 MidiMessage::UpdateScale(scale) => {
-                    self.state.scale = scale;
+                    let parts: Vec<&str> = scale.split_whitespace().collect();
+                    if parts.len() == 2 {
+                        self.state.root_note = parts[0].to_string();
+                        self.state.scale_type = parts[1].to_string();
+                    }
                 }
             }
         }
