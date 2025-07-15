@@ -60,7 +60,7 @@ fn get_scale_map() -> ScaleMap {
     scales
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 struct ChordId {
     root_note: String,
     chord_type: String,
@@ -71,7 +71,7 @@ enum MidiMessage {
     ChordOff,
     SetInversionChord(ChordId),
     UpdateOctave(i8),
-    UpdateInversion(u8),
+    UpdateInversion(ChordId, u8),
     UpdateScale(String),
 }
 
@@ -83,6 +83,7 @@ struct GuiState {
     inversion: u8,
     playing_chord: Option<ChordId>,
     inversion_chord: Option<ChordId>,
+    inversion_map: HashMap<ChordId, u8>,
 }
 
 pub struct PerfectChords {
@@ -122,6 +123,7 @@ impl Default for PerfectChords {
                 inversion: 0,
                 playing_chord: None,
                 inversion_chord: None,
+                inversion_map: HashMap::new(),
             },
         }
     }
@@ -253,16 +255,41 @@ impl Plugin for PerfectChords {
 
                         ui.add_space(20.0);
                         ui.label("Inversion:");
+                        let current_inversion = state.inversion_chord.as_ref()
+                            .and_then(|chord_id| state.inversion_map.get(chord_id))
+                            .copied()
+                            .unwrap_or(0);
+
                         if ui.button("◀").clicked() {
-                            if state.inversion > 0 {
-                                state.inversion -= 1;
-                                let _ = sender.send(MidiMessage::UpdateInversion(state.inversion));
+                            if let Some(chord_id) = state.inversion_chord.clone() {
+                                let voicing = chord_table
+                                    .get(&chord_id.root_note)
+                                    .and_then(|v| v.get(&chord_id.chord_type));
+                                if let Some(voicing) = voicing {
+                                    let num_inversions = voicing.inversions.len() as u8;
+                                    if num_inversions > 0 {
+                                        let new_inversion = (current_inversion + num_inversions - 1) % num_inversions;
+                                        state.inversion_map.insert(chord_id.clone(), new_inversion);
+                                        let _ = sender.send(MidiMessage::UpdateInversion(chord_id, new_inversion));
+                                    }
+                                }
                             }
                         }
-                        ui.label(format!("{}", state.inversion));
+                        ui.label(format!("{}", current_inversion));
                         if ui.button("▶").clicked() {
-                            state.inversion += 1;
-                            let _ = sender.send(MidiMessage::UpdateInversion(state.inversion));
+                            if let Some(chord_id) = state.inversion_chord.clone() {
+                                let voicing = chord_table
+                                    .get(&chord_id.root_note)
+                                    .and_then(|v| v.get(&chord_id.chord_type));
+                                if let Some(voicing) = voicing {
+                                    let num_inversions = voicing.inversions.len() as u8;
+                                    if num_inversions > 0 {
+                                        let new_inversion = (current_inversion + 1) % num_inversions;
+                                        state.inversion_map.insert(chord_id.clone(), new_inversion);
+                                        let _ = sender.send(MidiMessage::UpdateInversion(chord_id, new_inversion));
+                                    }
+                                }
+                            }
                         }
                     });
 
@@ -312,22 +339,18 @@ impl Plugin for PerfectChords {
                                             .fill(button_color);
                                         let response = ui.add(button);
 
-                                        if response.hovered()
-                                            && egui_ctx.input(|i| i.pointer.primary_down())
-                                        {
+                                        if response.clicked() {
                                             if egui_ctx.input(|i| i.modifiers.ctrl) {
-                                                if response.clicked() {
-                                                    state.inversion_chord = Some(chord_id.clone());
-                                                    let _ = sender.send(
-                                                        MidiMessage::SetInversionChord(chord_id),
-                                                    );
-                                                }
-                                            } else if state.playing_chord.as_ref()
-                                                != Some(&chord_id)
-                                            {
-                                                state.playing_chord = Some(chord_id.clone());
-                                                let _ = sender.send(MidiMessage::ChordOn(chord_id));
+                                                state.inversion_chord = Some(chord_id.clone());
+                                                let _ = sender
+                                                    .send(MidiMessage::SetInversionChord(chord_id));
                                             }
+                                        } else if response.hovered()
+                                            && egui_ctx.input(|i| i.pointer.primary_down())
+                                            && state.playing_chord.as_ref() != Some(&chord_id)
+                                        {
+                                            state.playing_chord = Some(chord_id.clone());
+                                            let _ = sender.send(MidiMessage::ChordOn(chord_id));
                                         }
                                     } else {
                                         ui.label("");
@@ -368,15 +391,15 @@ impl Plugin for PerfectChords {
                         });
                     }
 
-                    let target_chord_id = self.state.inversion_chord.as_ref().unwrap_or(&chord_id);
+                    let current_inversion = self.state.inversion_map.get(&chord_id).copied().unwrap_or(0);
                     if let Some(voicing) = self
                         .chord_table
-                        .get(&target_chord_id.root_note)
-                        .and_then(|v| v.get(&target_chord_id.chord_type))
+                        .get(&chord_id.root_note)
+                        .and_then(|v| v.get(&chord_id.chord_type))
                     {
                         let num_inversions = voicing.inversions.len();
                         if num_inversions > 0 {
-                            let inversion_idx = self.state.inversion as usize % num_inversions;
+                            let inversion_idx = current_inversion as usize % num_inversions;
                             let notes_to_play = &voicing.inversions[inversion_idx];
                             let octave_offset = (self.state.octave - 3) * 12;
 
@@ -413,8 +436,8 @@ impl Plugin for PerfectChords {
                 MidiMessage::UpdateOctave(octave) => {
                     self.state.octave = octave;
                 }
-                MidiMessage::UpdateInversion(inversion) => {
-                    self.state.inversion = inversion;
+                MidiMessage::UpdateInversion(chord_id, inversion) => {
+                    self.state.inversion_map.insert(chord_id, inversion);
                 }
                 MidiMessage::UpdateScale(scale) => {
                     let parts: Vec<&str> = scale.split_whitespace().collect();

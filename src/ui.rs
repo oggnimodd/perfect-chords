@@ -6,7 +6,7 @@ use iced::{
         widget::{self, Widget},
         Clipboard, Shell,
     },
-    alignment, mouse, Background, Color, Element, Font, Length, Rectangle, Size, Theme,
+    alignment, keyboard, mouse, Background, Color, Element, Font, Length, Rectangle, Size, Theme,
 };
 
 // Define constants for the grid layout
@@ -107,33 +107,42 @@ impl<'a> Widget<EditorMessage, renderer::Renderer> for ChordGrid<'a> {
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, EditorMessage>,
     ) -> iced::event::Status {
-        if let iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
-            if let Some(cursor_pos) = cursor.position_in(layout.bounds()) {
-                let num_cols = self.diatonics.len();
-                if num_cols == 0 {
-                    return iced::event::Status::Ignored;
-                }
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(cursor_pos) = cursor.position_in(layout.bounds()) {
+                    let num_cols = self.diatonics.len();
+                    if num_cols == 0 {
+                        return iced::event::Status::Ignored;
+                    }
 
-                let button_width =
-                    (layout.bounds().width - (num_cols - 1) as f32 * BUTTON_SPACING)
-                        / num_cols as f32;
+                    let button_width =
+                        (layout.bounds().width - (num_cols - 1) as f32 * BUTTON_SPACING)
+                            / num_cols as f32;
 
-                let col_idx = (cursor_pos.x / (button_width + BUTTON_SPACING)).floor() as usize;
-                let row_idx = (cursor_pos.y / (BUTTON_HEIGHT + BUTTON_SPACING)).floor() as usize;
+                    let col_idx =
+                        (cursor_pos.x / (button_width + BUTTON_SPACING)).floor() as usize;
+                    let row_idx =
+                        (cursor_pos.y / (BUTTON_HEIGHT + BUTTON_SPACING)).floor() as usize;
 
-                if row_idx < GRID_ROWS.len() && col_idx < num_cols {
-                    let (type_key, _) = GRID_ROWS[row_idx];
-                    let diatonic = &self.diatonics[col_idx];
+                    if row_idx < GRID_ROWS.len() && col_idx < num_cols {
+                        let (type_key, _) = GRID_ROWS[row_idx];
+                        let diatonic = &self.diatonics[col_idx];
 
-                    let chord_id = ChordId {
-                        root_note: diatonic.root_note.clone(),
-                        chord_type: type_key.to_string(),
-                    };
+                        let chord_id = ChordId {
+                            root_note: diatonic.root_note.clone(),
+                            chord_type: type_key.to_string(),
+                        };
 
-                    shell.publish(EditorMessage::ChordPressed(chord_id));
-                    return iced::event::Status::Captured;
+                        if _clipboard.modifiers().command() || _clipboard.modifiers().control() {
+                            shell.publish(EditorMessage::SetInversionChord(chord_id));
+                        } else {
+                            shell.publish(EditorMessage::ChordPressed(chord_id));
+                        }
+                        return iced::event::Status::Captured;
+                    }
                 }
             }
+            _ => {}
         }
         iced::event::Status::Ignored
     }
