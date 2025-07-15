@@ -90,7 +90,7 @@ struct GuiState {
     key_mappings: HashMap<egui::Key, ChordId>,
     active_key_chord: Option<egui::Key>,
     view_mode: ViewMode,
-    chord_to_map: Option<ChordId>,
+    key_to_map: Option<egui::Key>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +145,7 @@ impl Default for PerfectChords {
                 key_mappings: generate_default_key_mappings(&get_scale_map(), "C Major".to_string()),
                 active_key_chord: None,
                 view_mode: ViewMode::ChordGrid,
-                chord_to_map: None,
+                key_to_map: None,
             },
         }
     }
@@ -252,19 +252,16 @@ impl Plugin for PerfectChords {
                         if let egui::Event::Key {
                             key,
                             pressed,
+                            repeat,
                             ..
-                        } = event {
-                            if *pressed {
-                                // Key pressed
-                                if state.active_key_chord.is_none() {
-                                    // Only play if no other key-triggered chord is active
-                                    if state.key_mappings.contains_key(key) {
-                                        state.active_key_chord = Some(*key);
-                                        let _ = sender.send(MidiMessage::KeyChordOn(*key));
-                                    }
+                        } = event
+                        {
+                            if *pressed && !*repeat {
+                                if state.key_mappings.contains_key(key) {
+                                    state.active_key_chord = Some(*key);
+                                    let _ = sender.send(MidiMessage::KeyChordOn(*key));
                                 }
-                            } else {
-                                // Key released
+                            } else if !*pressed {
                                 if state.active_key_chord == Some(*key) {
                                     state.active_key_chord = None;
                                     let _ = sender.send(MidiMessage::KeyChordOff(*key));
@@ -460,61 +457,81 @@ impl Plugin for PerfectChords {
                         ViewMode::KeyMapping => {
                             ui.heading("Key Mapping");
                             ui.add_space(10.0);
-                            
-                            if let Some(chord_id_to_map) = state.chord_to_map.clone() {
-                                ui.label(format!("Press a key to map to {}{}", chord_id_to_map.root_note, chord_id_to_map.chord_type));
-                                
-                                egui_ctx.input(|i| {
-                                    for event in &i.events {
-                                        if let egui::Event::Key { key, pressed: true, .. } = event {
-                                            // Remove any existing mapping for the key before assigning a new one
-                                            state.key_mappings.retain(|k, _| k != key);
-                                            // Remove any existing mapping for the chord before assigning a new one
-                                            state.key_mappings.retain(|_, v| v != &chord_id_to_map);
-                                            
-                                            state.key_mappings.insert(*key, chord_id_to_map.clone());
-                                            state.chord_to_map = None; // Clear the mapping target
-                                            break;
-                                        }
+
+                            let keys_to_map = [
+                                egui::Key::Z,
+                                egui::Key::X,
+                                egui::Key::C,
+                                egui::Key::V,
+                                egui::Key::B,
+                                egui::Key::N,
+                                egui::Key::M,
+                            ];
+
+                            if let Some(key_to_map) = state.key_to_map {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Select a chord for key {:?}", key_to_map));
+                                    if ui.button("Cancel").clicked() {
+                                        state.key_to_map = None;
                                     }
                                 });
 
-                            } else {
                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                    egui::Grid::new("key_mapping_grid")
-                                        .num_columns(3)
-                                        .spacing([40.0, 4.0])
-                                        .striped(true)
-                                        .show(ui, |ui| {
-                                            let mut all_chords: Vec<ChordId> = chord_table.iter()
-                                                .flat_map(|(root, types)| {
-                                                    types.keys().map(|chord_type| ChordId {
-                                                        root_note: root.clone(),
-                                                        chord_type: chord_type.clone(),
-                                                    })
-                                                })
-                                                .collect();
-                                            
-                                            all_chords.sort_by(|a, b| a.root_note.cmp(&b.root_note).then(a.chord_type.cmp(&b.chord_type)));
+                                    let mut all_chords: Vec<ChordId> = chord_table
+                                        .iter()
+                                        .flat_map(|(root, types)| {
+                                            types.keys().map(|chord_type| ChordId {
+                                                root_note: root.clone(),
+                                                chord_type: chord_type.clone(),
+                                            })
+                                        })
+                                        .collect();
 
-                                            for chord_id in all_chords {
-                                                let label = format!("{}{}", chord_id.root_note, chord_id.chord_type);
-                                                ui.label(label);
+                                    all_chords.sort_by(|a, b| {
+                                        a.root_note
+                                            .cmp(&b.root_note)
+                                            .then(a.chord_type.cmp(&b.chord_type))
+                                    });
 
-                                                let mapped_key_str = state.key_mappings.iter()
-                                                    .find(|(_, v)| *v == &chord_id)
-                                                    .map(|(k, _)| format!("{:?}", k))
-                                                    .unwrap_or_else(|| "None".to_string());
-
-                                                ui.label(format!("Mapped to: {}", mapped_key_str));
-
-                                                if ui.button("Map Key").clicked() {
-                                                    state.chord_to_map = Some(chord_id.clone());
-                                                }
-                                                ui.end_row();
+                                    egui::Grid::new("chord_selection_grid").show(ui, |ui| {
+                                        for chord_id in all_chords {
+                                            let label =
+                                                format!("{}{}", chord_id.root_note, chord_id.chord_type);
+                                            if ui.button(label).clicked() {
+                                                // Ensure chord uniqueness
+                                                state.key_mappings.retain(|_k, v| v != &chord_id);
+                                                // Map key to chord (overwrites if key was already mapped)
+                                                state
+                                                    .key_mappings
+                                                    .insert(key_to_map, chord_id.clone());
+                                                state.key_to_map = None;
+                                                break;
                                             }
-                                        });
+                                        }
+                                    });
                                 });
+                            } else {
+                                egui::Grid::new("key_mapping_grid")
+                                    .num_columns(3)
+                                    .spacing([40.0, 4.0])
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        for key in keys_to_map.iter() {
+                                            ui.label(format!("{:?}", key));
+
+                                            let mapped_chord_str = state
+                                                .key_mappings
+                                                .get(key)
+                                                .map(|c| format!("{}{}", c.root_note, c.chord_type))
+                                                .unwrap_or_else(|| "None".to_string());
+                                            ui.label(mapped_chord_str);
+
+                                            if ui.button("Map").clicked() {
+                                                state.key_to_map = Some(*key);
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
                             }
                         }
                     }
