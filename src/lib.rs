@@ -477,38 +477,56 @@ impl Plugin for PerfectChords {
                                 });
 
                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                    let mut all_chords: Vec<ChordId> = chord_table
-                                        .iter()
-                                        .flat_map(|(root, types)| {
-                                            types.keys().map(|chord_type| ChordId {
-                                                root_note: root.clone(),
-                                                chord_type: chord_type.clone(),
-                                            })
-                                        })
-                                        .collect();
-
-                                    all_chords.sort_by(|a, b| {
-                                        a.root_note
-                                            .cmp(&b.root_note)
-                                            .then(a.chord_type.cmp(&b.chord_type))
-                                    });
-
-                                    egui::Grid::new("chord_selection_grid").show(ui, |ui| {
-                                        for chord_id in all_chords {
-                                            let label =
-                                                format!("{}{}", chord_id.root_note, chord_id.chord_type);
-                                            if ui.button(label).clicked() {
-                                                // Ensure chord uniqueness
-                                                state.key_mappings.retain(|_k, v| v != &chord_id);
-                                                // Map key to chord (overwrites if key was already mapped)
-                                                state
-                                                    .key_mappings
-                                                    .insert(key_to_map, chord_id.clone());
-                                                state.key_to_map = None;
-                                                break;
+                                    egui::Grid::new("key_map_chord_selection_grid").show(
+                                        ui,
+                                        |ui| {
+                                            ui.label("");
+                                            for d in &diatonics {
+                                                ui.strong(&d.degree);
                                             }
-                                        }
-                                    });
+                                            ui.end_row();
+
+                                            for &(type_key, suffix) in &grid_rows {
+                                                ui.label("");
+                                                for d in &diatonics {
+                                                    let root_note = &d.root_note;
+                                                    let chord_id = ChordId {
+                                                        root_note: root_note.clone(),
+                                                        chord_type: type_key.to_string(),
+                                                    };
+
+                                                    if chord_table
+                                                        .get(root_note)
+                                                        .and_then(|vars| vars.get(type_key))
+                                                        .is_some()
+                                                    {
+                                                        let label =
+                                                            format!("{}{}", root_note, suffix);
+                                                        let button = egui::Button::new(label)
+                                                            .min_size(egui::vec2(
+                                                                ui.available_width()
+                                                                    / diatonics.len() as f32,
+                                                                0.0,
+                                                            ));
+
+                                                        if ui.add(button).clicked() {
+                                                            state.key_mappings.retain(|_k, v| {
+                                                                v != &chord_id
+                                                            });
+                                                            state.key_mappings.insert(
+                                                                key_to_map,
+                                                                chord_id.clone(),
+                                                            );
+                                                            state.key_to_map = None;
+                                                        }
+                                                    } else {
+                                                        ui.label("");
+                                                    }
+                                                }
+                                                ui.end_row();
+                                            }
+                                        },
+                                    );
                                 });
                             } else {
                                 egui::Grid::new("key_mapping_grid")
