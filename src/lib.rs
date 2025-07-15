@@ -658,10 +658,9 @@ impl Plugin for PerfectChords {
                 }
                 MidiMessage::KeyChordOn(key) => {
                     if let Some(chord_id) = self.state.key_mappings.get(&key).cloned() {
-                        if self.state.playing_chord.as_ref() == Some(&chord_id) {
-                            continue;
-                        }
-
+                        // FIX: Unconditionally stop previous notes and play the new chord.
+                        // This removes the confusing check against the previous playing state
+                        // and ensures the audio thread always plays the chord from the latest mapping.
                         for note in self.active_notes.drain(..) {
                             context.send_event(NoteEvent::NoteOff {
                                 timing: 0,
