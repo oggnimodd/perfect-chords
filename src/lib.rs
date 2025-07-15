@@ -256,7 +256,7 @@ impl Plugin for PerfectChords {
                             }
                             ui.end_row();
 
-                            for (type_key, suffix) in grid_rows {
+                            for &(type_key, suffix) in &grid_rows {
                                 ui.label("");
                                 for d in &diatonics {
                                     let root_note = &d.root_note;
@@ -267,17 +267,14 @@ impl Plugin for PerfectChords {
 
                                     if chord_table
                                         .get(root_note)
-                                        .and_then(|vars| vars.get(type_key))
-                                        .is_some()
+                                                                                   .and_then(|vars| vars.get(type_key))                                        .is_some()
                                     {
                                         let label = format!("{}{}", root_note, suffix);
                                         let is_playing =
                                             state.playing_chord.as_ref() == Some(&chord_id);
                                         let is_inversion_target =
                                             state.inversion_chord.as_ref() == Some(&chord_id);
-                                        let is_diatonic = d.chord_type == type_key;
-
-                                        let button_color = if is_playing {
+                                          let is_diatonic = d.chord_type == type_key;                                        let button_color = if is_playing {
                                             egui::Color32::from_rgb(100, 200, 100)
                                         } else if is_inversion_target {
                                             egui::Color32::from_rgb(100, 150, 255)
@@ -287,10 +284,9 @@ impl Plugin for PerfectChords {
                                             ui.visuals().widgets.noninteractive.bg_fill
                                         };
 
-                                        let button = egui::Button::new(label)
-                                            .min_size(egui::vec2(ui.available_width(), 20.0))
-                                            .fill(button_color);
-
+                                          let button = egui::Button::new(label)
+                                              .min_size(egui::vec2(ui.available_width() / diatonics.len() as f32, ui.available_height() / grid_rows.len() as f32))
+                                              .fill(button_color);
                                         let response = ui.add(button);
 
                                         if response.hovered()
