@@ -1,6 +1,6 @@
 use crossbeam_channel::{Receiver, Sender};
 use nih_plug::prelude::*;
-use nih_plug_egui::{EguiState, create_egui_editor, egui};
+use nih_plug_egui::{create_egui_editor, egui, EguiState};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,6 +73,8 @@ enum MidiMessage {
     UpdateOctave(i8),
     UpdateInversion(ChordId, u8),
     UpdateScale(String),
+    KeyChordOn(egui::Key),
+    KeyChordOff(egui::Key),
 }
 
 #[derive(Default, Clone)]
@@ -84,6 +86,23 @@ struct GuiState {
     playing_chord: Option<ChordId>,
     inversion_chord: Option<ChordId>,
     inversion_map: HashMap<ChordId, u8>,
+
+    key_mappings: HashMap<egui::Key, ChordId>,
+    active_key_chord: Option<egui::Key>,
+    view_mode: ViewMode,
+    chord_to_map: Option<ChordId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    ChordGrid,
+    KeyMapping,
+}
+
+impl Default for ViewMode {
+    fn default() -> Self {
+        ViewMode::ChordGrid
+    }
 }
 
 pub struct PerfectChords {
@@ -123,9 +142,41 @@ impl Default for PerfectChords {
                 playing_chord: None,
                 inversion_chord: None,
                 inversion_map: HashMap::new(),
+                key_mappings: generate_default_key_mappings(&get_scale_map(), "C Major".to_string()),
+                active_key_chord: None,
+                view_mode: ViewMode::ChordGrid,
+                chord_to_map: None,
             },
         }
     }
+}
+
+fn generate_default_key_mappings(scale_map: &ScaleMap, current_scale: String) -> HashMap<egui::Key, ChordId> {
+    let mut mappings = HashMap::new();
+    let default_keys = [
+        egui::Key::Z,
+        egui::Key::X,
+        egui::Key::C,
+        egui::Key::V,
+        egui::Key::B,
+        egui::Key::N,
+        egui::Key::M,
+    ];
+
+    if let Some(diatonics) = scale_map.get(&current_scale) {
+        for (i, key) in default_keys.iter().enumerate() {
+            if let Some(diatonic_chord) = diatonics.get(i) {
+                mappings.insert(
+                    *key,
+                    ChordId {
+                        root_note: diatonic_chord.root_note.clone(),
+                        chord_type: diatonic_chord.chord_type.clone(),
+                    },
+                );
+            }
+        }
+    }
+    mappings
 }
 
 impl Default for PerfectChordsParams {
@@ -143,8 +194,6 @@ impl Plugin for PerfectChords {
     const EMAIL: &'static str = "user@example.com";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // Even for a MIDI-only plugin, hosts like LMMS expect an audio output bus
-    // for instrument plugins. We'll define a silent stereo output.
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: None,
         main_output_channels: Some(new_nonzero_u32(2)),
@@ -197,174 +246,277 @@ impl Plugin for PerfectChords {
                 let scale = format!("{} {}", state.root_note, state.scale_type);
                 let diatonics = scale_map.get(&scale).cloned().unwrap_or_default();
 
+                // Handle keyboard input for playing chords
+                egui_ctx.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::Key {
+                            key,
+                            pressed,
+                            ..
+                        } = event {
+                            if *pressed {
+                                // Key pressed
+                                if state.active_key_chord.is_none() {
+                                    // Only play if no other key-triggered chord is active
+                                    if state.key_mappings.contains_key(key) {
+                                        state.active_key_chord = Some(*key);
+                                        let _ = sender.send(MidiMessage::KeyChordOn(*key));
+                                    }
+                                }
+                            } else {
+                                // Key released
+                                if state.active_key_chord == Some(*key) {
+                                    state.active_key_chord = None;
+                                    let _ = sender.send(MidiMessage::KeyChordOff(*key));
+                                }
+                            }
+                        }
+                    }
+                });
+
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
                     ui.style_mut().spacing.button_padding = egui::vec2(4.0, 4.0);
                     ui.style_mut().spacing.item_spacing = egui::vec2(2.0, 2.0);
 
                     ui.horizontal(|ui| {
-                        ui.label("Root Note:");
-                        egui::ComboBox::from_id_salt("root_note_picker")
-                            .selected_text(&state.root_note)
-                            .show_ui(ui, |ui| {
-                                for note in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].iter() {
-                                    if ui
-                                        .selectable_value(
-                                            &mut state.root_note,
-                                            note.to_string(),
-                                            *note,
-                                        )
-                                        .clicked()
-                                    {
-                                        let new_scale = format!("{} {}", state.root_note, state.scale_type);
-                                        let _ = sender.send(MidiMessage::UpdateScale(new_scale));
-                                    }
-                                }
-                            });
-
-                        ui.label("Scale Type:");
-                        egui::ComboBox::from_id_salt("scale_type_picker")
-                            .selected_text(&state.scale_type)
-                            .show_ui(ui, |ui| {
-                                for scale_type in ["Major", "Minor"].iter() {
-                                    if ui
-                                        .selectable_value(
-                                            &mut state.scale_type,
-                                            scale_type.to_string(),
-                                            *scale_type,
-                                        )
-                                        .clicked()
-                                    {
-                                        let new_scale = format!("{} {}", state.root_note, state.scale_type);
-                                        let _ = sender.send(MidiMessage::UpdateScale(new_scale));
-                                    }
-                                }
-                            });
-
-                        ui.add_space(20.0);
-                        ui.label("Octave:");
-                        if ui.button("◀").clicked() {
-                            state.octave -= 1;
-                            let _ = sender.send(MidiMessage::UpdateOctave(state.octave));
-                        }
-                        ui.label(format!("{}", state.octave));
-                        if ui.button("▶").clicked() {
-                            state.octave += 1;
-                            let _ = sender.send(MidiMessage::UpdateOctave(state.octave));
-                        }
-
-                        ui.add_space(20.0);
-                        ui.label("Inversion:");
-                        let current_inversion = state.inversion_chord.as_ref()
-                            .and_then(|chord_id| state.inversion_map.get(chord_id))
-                            .copied()
-                            .unwrap_or(0);
-
-                        if ui.button("◀").clicked() {
-                            if let Some(chord_id) = state.inversion_chord.clone() {
-                                let voicing = chord_table
-                                    .get(&chord_id.root_note)
-                                    .and_then(|v| v.get(&chord_id.chord_type));
-                                if let Some(voicing) = voicing {
-                                    let num_inversions = voicing.inversions.len() as u8;
-                                    if num_inversions > 0 {
-                                        let new_inversion = (current_inversion + num_inversions - 1) % num_inversions;
-                                        state.inversion_map.insert(chord_id.clone(), new_inversion);
-                                        let _ = sender.send(MidiMessage::UpdateInversion(chord_id, new_inversion));
-                                    }
-                                }
-                            }
-                        }
-                        ui.label(format!("{}", current_inversion));
-                        if ui.button("▶").clicked() {
-                            if let Some(chord_id) = state.inversion_chord.clone() {
-                                let voicing = chord_table
-                                    .get(&chord_id.root_note)
-                                    .and_then(|v| v.get(&chord_id.chord_type));
-                                if let Some(voicing) = voicing {
-                                    let num_inversions = voicing.inversions.len() as u8;
-                                    if num_inversions > 0 {
-                                        let new_inversion = (current_inversion + 1) % num_inversions;
-                                        state.inversion_map.insert(chord_id.clone(), new_inversion);
-                                        let _ = sender.send(MidiMessage::UpdateInversion(chord_id, new_inversion));
-                                    }
-                                }
-                            }
-                        }
+                        ui.selectable_value(&mut state.view_mode, ViewMode::ChordGrid, "Chord Grid");
+                        ui.selectable_value(&mut state.view_mode, ViewMode::KeyMapping, "Key Mapping");
                     });
 
                     ui.separator();
 
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        egui::Grid::new("chord_grid").show(ui, |ui| {
-                            ui.label("");
-                            for d in &diatonics {
-                                ui.strong(&d.degree);
-                            }
-                            ui.end_row();
-
-                            for &(type_key, suffix) in &grid_rows {
-                                ui.label("");
-                                for d in &diatonics {
-                                    let root_note = &d.root_note;
-                                    let chord_id = ChordId {
-                                        root_note: root_note.clone(),
-                                        chord_type: type_key.to_string(),
-                                    };
-
-                                    if chord_table
-                                        .get(root_note)
-                                        .and_then(|vars| vars.get(type_key))
-                                        .is_some()
-                                    {
-                                        let label = format!("{}{}", root_note, suffix);
-                                        let is_playing =
-                                            state.playing_chord.as_ref() == Some(&chord_id);
-                                        let is_inversion_target =
-                                            state.inversion_chord.as_ref() == Some(&chord_id);
-                                        let is_diatonic = d.chord_type == type_key;
-
-                                        let button_color = if is_playing {
-                                            egui::Color32::from_rgb(100, 200, 100)
-                                        } else if is_inversion_target {
-                                            egui::Color32::from_rgb(100, 150, 255)
-                                        } else if is_diatonic {
-                                            ui.visuals().widgets.inactive.bg_fill
-                                        } else {
-                                            ui.visuals().widgets.noninteractive.bg_fill
-                                        };
-
-                                        let button = egui::Button::new(label)
-                                            .min_size(egui::vec2(ui.available_width() / diatonics.len() as f32, ui.available_height() / grid_rows.len() as f32))
-                                            .fill(button_color);
-                                        let response = ui.add(button);
-
-                                        if response.clicked() {
-                                            if egui_ctx.input(|i| i.modifiers.ctrl) {
-                                                state.inversion_chord = Some(chord_id.clone());
-                                                let _ = sender
-                                                    .send(MidiMessage::SetInversionChord(chord_id));
+                    match state.view_mode {
+                        ViewMode::ChordGrid => {
+                            ui.horizontal(|ui| {
+                                ui.label("Root Note:");
+                                egui::ComboBox::from_id_salt("root_note_picker")
+                                    .selected_text(&state.root_note)
+                                    .show_ui(ui, |ui| {
+                                        for note in ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].iter() {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut state.root_note,
+                                                    note.to_string(),
+                                                    *note,
+                                                )
+                                                .clicked()
+                                            {
+                                                let new_scale = format!("{} {}", state.root_note, state.scale_type);
+                                                state.key_mappings = generate_default_key_mappings(&scale_map, new_scale.clone());
+                                                let _ = sender.send(MidiMessage::UpdateScale(new_scale));
                                             }
-                                        } else if response.hovered()
-                                            && egui_ctx.input(|i| i.pointer.primary_down())
-                                            && state.playing_chord.as_ref() != Some(&chord_id)
-                                        {
-                                            state.playing_chord = Some(chord_id.clone());
-                                            let _ = sender.send(MidiMessage::ChordOn(chord_id));
                                         }
-                                    } else {
-                                        ui.label("");
+                                    });
+
+                                ui.label("Scale Type:");
+                                egui::ComboBox::from_id_salt("scale_type_picker")
+                                    .selected_text(&state.scale_type)
+                                    .show_ui(ui, |ui| {
+                                        for scale_type in ["Major", "Minor"].iter() {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut state.scale_type,
+                                                    scale_type.to_string(),
+                                                    *scale_type,
+                                                )
+                                                .clicked()
+                                            {
+                                                let new_scale = format!("{} {}", state.root_note, state.scale_type);
+                                                state.key_mappings = generate_default_key_mappings(&scale_map, new_scale.clone());
+                                                let _ = sender.send(MidiMessage::UpdateScale(new_scale));
+                                            }
+                                        }
+                                    });
+
+                                ui.add_space(20.0);
+                                ui.label("Octave:");
+                                if ui.button("◀").clicked() {
+                                    state.octave -= 1;
+                                    let _ = sender.send(MidiMessage::UpdateOctave(state.octave));
+                                }
+                                ui.label(format!("{}", state.octave));
+                                if ui.button("▶").clicked() {
+                                    state.octave += 1;
+                                    let _ = sender.send(MidiMessage::UpdateOctave(state.octave));
+                                }
+
+                                ui.add_space(20.0);
+                                ui.label("Inversion:");
+                                let current_inversion = state.inversion_chord.as_ref()
+                                    .and_then(|chord_id| state.inversion_map.get(chord_id))
+                                    .copied()
+                                    .unwrap_or(0);
+
+                                if ui.button("◀").clicked() {
+                                    if let Some(chord_id) = state.inversion_chord.clone() {
+                                        let voicing = chord_table
+                                            .get(&chord_id.root_note)
+                                            .and_then(|v| v.get(&chord_id.chord_type));
+                                        if let Some(voicing) = voicing {
+                                            let num_inversions = voicing.inversions.len() as u8;
+                                            if num_inversions > 0 {
+                                                let new_inversion = (current_inversion + num_inversions - 1) % num_inversions;
+                                                state.inversion_map.insert(chord_id.clone(), new_inversion);
+                                                let _ = sender.send(MidiMessage::UpdateInversion(chord_id, new_inversion));
+                                            }
+                                        }
                                     }
                                 }
-                                ui.end_row();
-                            }
-                        });
-                    });
+                                ui.label(format!("{}", current_inversion));
+                                if ui.button("▶").clicked() {
+                                    if let Some(chord_id) = state.inversion_chord.clone() {
+                                        let voicing = chord_table
+                                            .get(&chord_id.root_note)
+                                            .and_then(|v| v.get(&chord_id.chord_type));
+                                        if let Some(voicing) = voicing {
+                                            let num_inversions = voicing.inversions.len() as u8;
+                                            if num_inversions > 0 {
+                                                let new_inversion = (current_inversion + 1) % num_inversions;
+                                                state.inversion_map.insert(chord_id.clone(), new_inversion);
+                                                let _ = sender.send(MidiMessage::UpdateInversion(chord_id, new_inversion));
+                                            }
+                                        }
+                                    }
+                                }
+                            });
 
-                    if state.playing_chord.is_some()
-                        && egui_ctx.input(|i| i.pointer.primary_released())
-                    {
-                        state.playing_chord = None;
-                        let _ = sender.send(MidiMessage::ChordOff);
+                            ui.separator();
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                egui::Grid::new("chord_grid").show(ui, |ui| {
+                                    ui.label("");
+                                    for d in &diatonics {
+                                        ui.strong(&d.degree);
+                                    }
+                                    ui.end_row();
+
+                                    for &(type_key, suffix) in &grid_rows {
+                                        ui.label("");
+                                        for d in &diatonics {
+                                            let root_note = &d.root_note;
+                                            let chord_id = ChordId {
+                                                root_note: root_note.clone(),
+                                                chord_type: type_key.to_string(),
+                                            };
+
+                                            if chord_table
+                                                .get(root_note)
+                                                .and_then(|vars| vars.get(type_key))
+                                                .is_some()
+                                            {
+                                                let label = format!("{}{}", root_note, suffix);
+                                                let is_playing_mouse =
+                                                    state.playing_chord.as_ref() == Some(&chord_id);
+                                                let is_inversion_target =
+                                                    state.inversion_chord.as_ref() == Some(&chord_id);
+                                                let is_diatonic = d.chord_type == type_key;
+                                                
+                                                let is_key_active = state.active_key_chord
+                                                    .and_then(|key| state.key_mappings.get(&key))
+                                                    == Some(&chord_id);
+
+
+                                                let button_color = if is_playing_mouse || is_key_active {
+                                                    egui::Color32::from_rgb(100, 200, 100)
+                                                } else if is_inversion_target {
+                                                    egui::Color32::from_rgb(100, 150, 255)
+                                                } else if is_diatonic {
+                                                    ui.visuals().widgets.inactive.bg_fill
+                                                } else {
+                                                    ui.visuals().widgets.noninteractive.bg_fill
+                                                };
+
+                                                let button = egui::Button::new(label)
+                                                    .min_size(egui::vec2(ui.available_width() / diatonics.len() as f32, 0.0))
+                                                    .fill(button_color);
+                                                let response = ui.add(button);
+
+                                                if response.is_pointer_button_down_on() {
+                                                    if egui_ctx.input(|i| i.modifiers.ctrl) {
+                                                        state.inversion_chord = Some(chord_id.clone());
+                                                        let _ = sender
+                                                            .send(MidiMessage::SetInversionChord(chord_id.clone()));
+                                                    } else if state.playing_chord.as_ref() != Some(&chord_id) {
+                                                        state.playing_chord = Some(chord_id.clone());
+                                                        let _ = sender.send(MidiMessage::ChordOn(chord_id));
+                                                    }
+                                                }
+                                            } else {
+                                                ui.label("");
+                                            }
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                            });
+
+                            if state.playing_chord.is_some()
+                                && egui_ctx.input(|i| i.pointer.primary_released())
+                            {
+                                state.playing_chord = None;
+                                let _ = sender.send(MidiMessage::ChordOff);
+                            }
+                        }
+                        ViewMode::KeyMapping => {
+                            ui.heading("Key Mapping");
+                            ui.add_space(10.0);
+                            
+                            if let Some(chord_id_to_map) = state.chord_to_map.clone() {
+                                ui.label(format!("Press a key to map to {}{}", chord_id_to_map.root_note, chord_id_to_map.chord_type));
+                                
+                                egui_ctx.input(|i| {
+                                    for event in &i.events {
+                                        if let egui::Event::Key { key, pressed: true, .. } = event {
+                                            // Remove any existing mapping for the key before assigning a new one
+                                            state.key_mappings.retain(|k, _| k != key);
+                                            // Remove any existing mapping for the chord before assigning a new one
+                                            state.key_mappings.retain(|_, v| v != &chord_id_to_map);
+                                            
+                                            state.key_mappings.insert(*key, chord_id_to_map.clone());
+                                            state.chord_to_map = None; // Clear the mapping target
+                                            break;
+                                        }
+                                    }
+                                });
+
+                            } else {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    egui::Grid::new("key_mapping_grid")
+                                        .num_columns(3)
+                                        .spacing([40.0, 4.0])
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            let mut all_chords: Vec<ChordId> = chord_table.iter()
+                                                .flat_map(|(root, types)| {
+                                                    types.keys().map(|chord_type| ChordId {
+                                                        root_note: root.clone(),
+                                                        chord_type: chord_type.clone(),
+                                                    })
+                                                })
+                                                .collect();
+                                            
+                                            all_chords.sort_by(|a, b| a.root_note.cmp(&b.root_note).then(a.chord_type.cmp(&b.chord_type)));
+
+                                            for chord_id in all_chords {
+                                                let label = format!("{}{}", chord_id.root_note, chord_id.chord_type);
+                                                ui.label(label);
+
+                                                let mapped_key_str = state.key_mappings.iter()
+                                                    .find(|(_, v)| *v == &chord_id)
+                                                    .map(|(k, _)| format!("{:?}", k))
+                                                    .unwrap_or_else(|| "None".to_string());
+
+                                                ui.label(format!("Mapped to: {}", mapped_key_str));
+
+                                                if ui.button("Map Key").clicked() {
+                                                    state.chord_to_map = Some(chord_id.clone());
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                            }
+                        }
                     }
                 });
             },
@@ -443,6 +595,57 @@ impl Plugin for PerfectChords {
                     if parts.len() == 2 {
                         self.state.root_note = parts[0].to_string();
                         self.state.scale_type = parts[1].to_string();
+                        self.state.key_mappings = generate_default_key_mappings(&self.scale_map, scale);
+                    }
+                }
+                MidiMessage::KeyChordOn(key) => {
+                    for note in self.active_notes.drain(..) {
+                        context.send_event(NoteEvent::NoteOff {
+                            timing: 0,
+                            voice_id: None,
+                            channel: 0,
+                            note,
+                            velocity: 0.0,
+                        });
+                    }
+
+                    if let Some(chord_id) = self.state.key_mappings.get(&key).cloned() {
+                        let current_inversion = self.state.inversion_map.get(&chord_id).copied().unwrap_or(0);
+                        if let Some(voicing) = self
+                            .chord_table
+                            .get(&chord_id.root_note)
+                            .and_then(|v| v.get(&chord_id.chord_type))
+                        {
+                            let num_inversions = voicing.inversions.len();
+                            if num_inversions > 0 {
+                                let inversion_idx = current_inversion as usize % num_inversions;
+                                let notes_to_play = &voicing.inversions[inversion_idx];
+                                let octave_offset = (self.state.octave - 3) * 12;
+
+                                for note in notes_to_play {
+                                    let final_note = (*note as i16 + octave_offset as i16) as u8;
+                                    context.send_event(NoteEvent::NoteOn {
+                                        timing: 0,
+                                        voice_id: None,
+                                        channel: 0,
+                                        note: final_note,
+                                        velocity: 0.8,
+                                    });
+                                    self.active_notes.push(final_note);
+                                }
+                            }
+                        }
+                    }
+                }
+                MidiMessage::KeyChordOff(_key) => {
+                    for note in self.active_notes.drain(..) {
+                        context.send_event(NoteEvent::NoteOff {
+                            timing: 0,
+                            voice_id: None,
+                            channel: 0,
+                            note,
+                            velocity: 0.0,
+                        });
                     }
                 }
             }
@@ -467,7 +670,6 @@ impl ClapPlugin for PerfectChords {
 
 impl Vst3Plugin for PerfectChords {
     const VST3_CLASS_ID: [u8; 16] = *b"PerfectChordsVST";
-    // Removed `Fx` as it's not an audio effect, which can confuse some hosts.
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Instrument, Vst3SubCategory::Tools];
 }
