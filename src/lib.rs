@@ -89,7 +89,7 @@ struct GuiState {
     inversion_map: HashMap<ChordId, u8>,
 
     key_mappings: HashMap<egui::Key, ChordId>,
-    active_keys: Vec<egui::Key>,
+    playing_key: Option<egui::Key>,
     view_mode: ViewMode,
     key_to_map: Option<egui::Key>,
 }
@@ -104,7 +104,7 @@ impl Default for GuiState {
             inversion_chord: None,
             inversion_map: HashMap::new(),
             key_mappings: generate_default_key_mappings(&get_scale_map(), "C Major".to_string()),
-            active_keys: Vec::new(),
+            playing_key: None,
             view_mode: ViewMode::ChordGrid,
             key_to_map: None,
         }
@@ -262,23 +262,17 @@ impl Plugin for PerfectChords {
                             ..
                         } = event
                         {
-                            if state.key_mappings.contains_key(key) {
-                                if *pressed && !*repeat {
-                                    if !state.active_keys.contains(key) {
-                                        state.active_keys.push(*key);
+                            if !*repeat && state.key_mappings.contains_key(key) {
+                                if *pressed {
+                                    if state.playing_key != Some(*key) {
+                                        state.playing_key = Some(*key);
+                                        state.playing_chord = state.key_mappings.get(key).cloned();
                                         let _ = sender.send(MidiMessage::KeyChordOn(*key));
                                     }
-                                } else if !*pressed {
-                                    if let Some(pos) =
-                                        state.active_keys.iter().position(|&k| k == *key)
-                                    {
-                                        state.active_keys.remove(pos);
-                                        if let Some(&last_key) = state.active_keys.last() {
-                                            let _ = sender.send(MidiMessage::KeyChordOn(last_key));
-                                        } else {
-                                            let _ = sender.send(MidiMessage::KeyChordOff(*key));
-                                        }
-                                    }
+                                } else if state.playing_key == Some(*key) {
+                                    state.playing_key = None;
+                                    state.playing_chord = None;
+                                    let _ = sender.send(MidiMessage::KeyChordOff(*key));
                                 }
                             }
                         }
@@ -422,11 +416,7 @@ impl Plugin for PerfectChords {
                                                     state.inversion_chord.as_ref() == Some(&chord_id);
                                                 let is_diatonic = d.chord_type == type_key;
                                                 
-                                                let is_key_active = state
-                                                    .active_keys
-                                                    .last()
-                                                    .and_then(|key| state.key_mappings.get(key))
-                                                    == Some(&chord_id);
+                                                let is_key_active = state.playing_key.as_ref().and_then(|k| state.key_mappings.get(k)) == Some(&chord_id);
 
 
                                                 let button_color = if is_playing_mouse || is_key_active {
@@ -658,9 +648,6 @@ impl Plugin for PerfectChords {
                 }
                 MidiMessage::KeyChordOn(key) => {
                     if let Some(chord_id) = self.state.key_mappings.get(&key).cloned() {
-                        // FIX: Unconditionally stop previous notes and play the new chord.
-                        // This removes the confusing check against the previous playing state
-                        // and ensures the audio thread always plays the chord from the latest mapping.
                         for note in self.active_notes.drain(..) {
                             context.send_event(NoteEvent::NoteOff {
                                 timing: 0,
@@ -698,6 +685,7 @@ impl Plugin for PerfectChords {
                             }
                         }
                         self.state.playing_chord = Some(chord_id);
+                        self.state.playing_key = Some(key);
                     }
                 }
                 MidiMessage::KeyChordOff(_key) => {
@@ -711,6 +699,7 @@ impl Plugin for PerfectChords {
                         });
                     }
                     self.state.playing_chord = None;
+                    self.state.playing_key = None;
                 }
             }
         }
