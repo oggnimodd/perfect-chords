@@ -2,8 +2,9 @@ use crossbeam_channel::{Receiver, Sender};
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui, EguiState};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use log::info;
 
 #[derive(Deserialize, Debug, Clone)]
 struct ChordVoicing {
@@ -76,6 +77,7 @@ enum MidiMessage {
     UpdateKeyMapping(egui::Key, ChordId),
     KeyChordOn(egui::Key),
     KeyChordOff(egui::Key),
+    UpdatePlayingKeys(HashSet<egui::Key>),
 }
 
 #[derive(Clone)]
@@ -89,7 +91,7 @@ struct GuiState {
     inversion_map: HashMap<ChordId, u8>,
 
     key_mappings: HashMap<egui::Key, ChordId>,
-    playing_key: Option<egui::Key>,
+    playing_keys: HashSet<egui::Key>,
     view_mode: ViewMode,
     key_to_map: Option<egui::Key>,
 }
@@ -104,7 +106,7 @@ impl Default for GuiState {
             inversion_chord: None,
             inversion_map: HashMap::new(),
             key_mappings: generate_default_key_mappings(&get_scale_map(), "C Major".to_string()),
-            playing_key: None,
+            playing_keys: HashSet::new(),
             view_mode: ViewMode::ChordGrid,
             key_to_map: None,
         }
@@ -127,7 +129,8 @@ pub struct PerfectChords {
     params: Arc<PerfectChordsParams>,
     midi_sender: Sender<MidiMessage>,
     midi_receiver: Receiver<MidiMessage>,
-    active_notes: Vec<u8>,
+    active_key_notes: HashMap<egui::Key, Vec<u8>>,
+    active_mouse_notes: Vec<u8>,
     chord_table: ChordTable,
     scale_map: ScaleMap,
     state: GuiState,
@@ -150,7 +153,8 @@ impl Default for PerfectChords {
             params: Arc::new(PerfectChordsParams::default()),
             midi_sender: sender,
             midi_receiver: receiver,
-            active_notes: Vec::new(),
+            active_key_notes: HashMap::new(),
+            active_mouse_notes: Vec::new(),
             chord_table,
             scale_map: get_scale_map(),
             state: GuiState::default(),
@@ -254,28 +258,36 @@ impl Plugin for PerfectChords {
                 let diatonics = scale_map.get(&scale).cloned().unwrap_or_default();
 
                 egui_ctx.input(|i| {
-                    for event in &i.events {
-                        if let egui::Event::Key {
-                            key,
-                            pressed,
-                            repeat,
-                            ..
-                        } = event
-                        {
-                            if !*repeat && state.key_mappings.contains_key(key) {
-                                if *pressed {
-                                    if state.playing_key != Some(*key) {
-                                        state.playing_key = Some(*key);
-                                        state.playing_chord = state.key_mappings.get(key).cloned();
-                                        let _ = sender.send(MidiMessage::KeyChordOn(*key));
-                                    }
-                                } else if state.playing_key == Some(*key) {
-                                    state.playing_key = None;
-                                    state.playing_chord = None;
-                                    let _ = sender.send(MidiMessage::KeyChordOff(*key));
-                                }
-                            }
-                        }
+                    let current_keys_down: HashSet<egui::Key> = i.keys_down.iter().copied().collect();
+
+                    // Keys that were just pressed
+                    let newly_pressed_keys: HashSet<egui::Key> = current_keys_down
+                        .difference(&state.playing_keys)
+                        .copied()
+                        .collect();
+
+                    // Keys that were just released
+                    let newly_released_keys: HashSet<egui::Key> = state.playing_keys
+                        .difference(&current_keys_down)
+                        .copied()
+                        .collect();
+
+                    for key in &newly_pressed_keys {
+                        info!("Editor: Sending KeyChordOn for key: {:?}", key);
+                        let _ = sender.send(MidiMessage::KeyChordOn(*key));
+                    }
+
+                    for key in &newly_released_keys {
+                        info!("Editor: Sending KeyChordOff for key: {:?}", key);
+                        let _ = sender.send(MidiMessage::KeyChordOff(*key));
+                    }
+
+                    // Update the state.playing_keys to reflect the current keys down
+                    state.playing_keys = current_keys_down;
+
+                    if !newly_pressed_keys.is_empty() || !newly_released_keys.is_empty() {
+                        info!("Editor: Sending UpdatePlayingKeys: {:?}", state.playing_keys);
+                        let _ = sender.send(MidiMessage::UpdatePlayingKeys(state.playing_keys.clone()));
                     }
                 });
 
@@ -416,7 +428,7 @@ impl Plugin for PerfectChords {
                                                     state.inversion_chord.as_ref() == Some(&chord_id);
                                                 let is_diatonic = d.chord_type == type_key;
                                                 
-                                                let is_key_active = state.playing_key.as_ref().and_then(|k| state.key_mappings.get(k)) == Some(&chord_id);
+                                                let is_key_active = state.playing_keys.iter().any(|k| state.key_mappings.get(k) == Some(&chord_id));
 
 
                                                 let button_color = if is_playing_mouse || is_key_active {
@@ -576,7 +588,8 @@ impl Plugin for PerfectChords {
         while let Ok(message) = self.midi_receiver.try_recv() {
             match message {
                 MidiMessage::ChordOn(chord_id) => {
-                    for note in self.active_notes.drain(..) {
+                    info!("Process: Received ChordOn for chord: {:?}", chord_id);
+                    for note in self.active_mouse_notes.drain(..) {
                         context.send_event(NoteEvent::NoteOff {
                             timing: 0,
                             voice_id: None,
@@ -607,14 +620,15 @@ impl Plugin for PerfectChords {
                                     note: final_note,
                                     velocity: 0.8,
                                 });
-                                self.active_notes.push(final_note);
+                                self.active_mouse_notes.push(final_note);
                             }
                         }
                     }
                     self.state.playing_chord = Some(chord_id);
                 }
                 MidiMessage::ChordOff => {
-                    for note in self.active_notes.drain(..) {
+                    info!("Process: Received ChordOff");
+                    for note in self.active_mouse_notes.drain(..) {
                         context.send_event(NoteEvent::NoteOff {
                             timing: 0,
                             voice_id: None,
@@ -626,15 +640,19 @@ impl Plugin for PerfectChords {
                     self.state.playing_chord = None;
                 }
                 MidiMessage::SetInversionChord(chord_id) => {
+                    info!("Process: Received SetInversionChord for chord: {:?}", chord_id);
                     self.state.inversion_chord = Some(chord_id);
                 }
                 MidiMessage::UpdateOctave(octave) => {
+                    info!("Process: Received UpdateOctave: {}", octave);
                     self.state.octave = octave;
                 }
                 MidiMessage::UpdateInversion(chord_id, inversion) => {
+                    info!("Process: Received UpdateInversion for chord: {:?}, inversion: {}", chord_id, inversion);
                     self.state.inversion_map.insert(chord_id, inversion);
                 }
                 MidiMessage::UpdateScale(scale) => {
+                    info!("Process: Received UpdateScale: {}", scale);
                     let parts: Vec<&str> = scale.split_whitespace().collect();
                     if parts.len() == 2 {
                         self.state.root_note = parts[0].to_string();
@@ -644,20 +662,16 @@ impl Plugin for PerfectChords {
                     }
                 }
                 MidiMessage::UpdateKeyMapping(key, chord_id) => {
+                    info!("Process: Received UpdateKeyMapping for key: {:?}, chord: {:?}", key, chord_id);
                     self.state.key_mappings.insert(key, chord_id);
                 }
                 MidiMessage::KeyChordOn(key) => {
+                    info!("Process: Received KeyChordOn for key: {:?}", key);
+                    if self.active_key_notes.contains_key(&key) {
+                        info!("Process: Key {:?} already active, skipping.", key);
+                        continue;
+                    }
                     if let Some(chord_id) = self.state.key_mappings.get(&key).cloned() {
-                        for note in self.active_notes.drain(..) {
-                            context.send_event(NoteEvent::NoteOff {
-                                timing: 0,
-                                voice_id: None,
-                                channel: 0,
-                                note,
-                                velocity: 0.0,
-                            });
-                        }
-
                         let current_inversion =
                             self.state.inversion_map.get(&chord_id).copied().unwrap_or(0);
                         if let Some(voicing) = self
@@ -671,6 +685,7 @@ impl Plugin for PerfectChords {
                                 let notes_to_play = &voicing.inversions[inversion_idx];
                                 let octave_offset = (self.state.octave - 3) * 12;
 
+                                let mut played_notes = Vec::new();
                                 for note in notes_to_play {
                                     let final_note = (*note as i16 + octave_offset as i16) as u8;
                                     context.send_event(NoteEvent::NoteOn {
@@ -680,26 +695,32 @@ impl Plugin for PerfectChords {
                                         note: final_note,
                                         velocity: 0.8,
                                     });
-                                    self.active_notes.push(final_note);
+                                    played_notes.push(final_note);
                                 }
+                                self.active_key_notes.insert(key, played_notes);
+                                info!("Process: Active key notes after KeyChordOn: {:?}", self.active_key_notes);
                             }
                         }
-                        self.state.playing_chord = Some(chord_id);
-                        self.state.playing_key = Some(key);
                     }
                 }
-                MidiMessage::KeyChordOff(_key) => {
-                    for note in self.active_notes.drain(..) {
-                        context.send_event(NoteEvent::NoteOff {
-                            timing: 0,
-                            voice_id: None,
-                            channel: 0,
-                            note,
-                            velocity: 0.0,
-                        });
+                MidiMessage::KeyChordOff(key) => {
+                    info!("Process: Received KeyChordOff for key: {:?}", key);
+                    if let Some(notes_to_stop) = self.active_key_notes.remove(&key) {
+                        for note in notes_to_stop {
+                            context.send_event(NoteEvent::NoteOff {
+                                timing: 0,
+                                voice_id: None,
+                                channel: 0,
+                                note,
+                                velocity: 0.0,
+                            });
+                        }
+                        info!("Process: Active key notes after KeyChordOff: {:?}", self.active_key_notes);
                     }
-                    self.state.playing_chord = None;
-                    self.state.playing_key = None;
+                }
+                MidiMessage::UpdatePlayingKeys(new_playing_keys) => {
+                    info!("Process: Received UpdatePlayingKeys: {:?}", new_playing_keys);
+                    self.state.playing_keys = new_playing_keys;
                 }
             }
         }
