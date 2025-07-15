@@ -80,7 +80,7 @@ struct GuiState {
     octave: i8,
     root_note: String,
     scale_type: String,
-    inversion: u8,
+
     playing_chord: Option<ChordId>,
     inversion_chord: Option<ChordId>,
     inversion_map: HashMap<ChordId, u8>,
@@ -120,7 +120,6 @@ impl Default for PerfectChords {
                 octave: 3,
                 root_note: "C".to_string(),
                 scale_type: "Major".to_string(),
-                inversion: 0,
                 playing_chord: None,
                 inversion_chord: None,
                 inversion_map: HashMap::new(),
